@@ -238,4 +238,183 @@ npm run dev
 
 then open it on [Open the server](http://localhost:8000)
 
-### 8.
+### 8. Initialize git project (live-sports-websocket )
+
+### 9. Setup DB .. Real-Time Sports DB Schema
+
+let's build the Database layer..for Data presistence in this application, we'r use Postgress. We will use Neon Postgress.
+Go to officala site of Neon site [Open the server](https://neon.com/) then click on "Read the docs", then search for "drizzle" then click on "Connect from Drizzle to Neon" , you can see pre-build promt for connecting Node/TypeScript applications to Neon using Drizzle ORM. copy the prompt ... or you can follow allong with the docs and setup
+installs 3 packages into your Node.js project.
+
+```bash
+npm i drizzle-orm pg dotenv
+
+
+npm install -D drizzle-kit typescript tsx @types/pg
+```
+
+1.drizzle-orm : This is the Drizzle ORM package. It allows your Node.js application to interact with PostgreSQL using TypeScript/JavaScript.
+
+Instead of writing SQL like:
+
+```sql
+SELECT * FROM users;
+```
+
+you can use Drizzle:
+
+```javascript
+const users = await db.select().from(users);
+```
+
+2.pg: is the PostgreSQL driver for Node.js.
+
+Your Node.js application needs something that can actually communicate with the PostgreSQL database.
+
+Node.js
+↓
+pg
+↓
+PostgreSQL
+
+Drizzle works on top of a database driver such as pg.
+
+Your code
+↓
+Drizzle ORM
+↓
+pg driver
+↓
+PostgreSQL / Neon
+
+3.dotenv :dotenv loads environment variables from a .env file.
+
+next create a db folder inside src, inside it create following files:
+
+- db.js
+
+```javascript
+// we importing dotenv config so we can actually process out db url
+import "dotenv/config";
+import { drizzle } from "drizzle-orm/node-postgres";
+import pg from "pg";
+
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is not defined");
+}
+// we're creating a new pool and hooking up to out db.
+export const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+export const db = drizzle(pool);
+```
+
+let's add a new file in src drizzle.config.js
+
+```javascript
+import "dotenv/config";
+import { defineConfig } from "drizzle-kit";
+
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is not set in .env file");
+}
+
+export default defineConfig({
+  schema: "./src/db/schema.js",
+  out: "./drizzle",
+  dialect: "postgresql",
+  dbCredentials: {
+    url: process.env.DATABASE_URL,
+  },
+});
+```
+
+don't forget to add our db url in .env file
+
+next it's time to define schemas, which all about deciding what to store and how to store
+create a file (schema.js) inside db folder
+
+```javascript
+import {
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  serial,
+  text,
+  timestamp,
+} from "drizzle-orm/pg-core";
+
+export const matchStatusEnum = pgEnum("match_status", [
+  "scheduled",
+  "live",
+  "finished",
+]);
+
+export const matches = pgTable("matches", {
+  id: serial("id").primaryKey(),
+  sport: text("sport").notNull(),
+  homeTeam: text("home_team").notNull(),
+  awayTeam: text("away_team").notNull(),
+  status: matchStatusEnum("status").notNull().default("scheduled"),
+  startTime: timestamp("start_time"),
+  endTime: timestamp("end_time"),
+  homeScore: integer("home_score").notNull().default(0),
+  awayScore: integer("away_score").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+export const commentary = pgTable("commentary", {
+  id: serial("id").primaryKey(),
+  matchId: integer("match_id")
+    .notNull()
+    .references(() => matches.id),
+  minute: integer("minute"),
+  sequence: integer("sequence"),
+  period: text("period"),
+  eventType: text("event_type"),
+  actor: text("actor"),
+  team: text("team"),
+  message: text("message").notNull(),
+  metadata: jsonb("metadata"),
+  tags: text("tags").array(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+```
+
+go to package.json and add these scripts
+
+```json
+"scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio",
+    "demo": "node src/crud-demo.js"
+  },
+```
+
+db:generate, db:migrate, db:studio these are necessary for us to be able to convert this nicely readable Drizzle code to SQL.
+
+so let's go ahead and run these commands one by one.
+
+```bash
+npm run db:generate
+
+```
+
+this will create raw SQL instructions for setting up and modifying the database structure.
+this command will generate a new folder called drizzle, inside that folder you can see this raw SQL instructions, but this won't just yet create your tables. because we've never conveyed them over to Neon. to do that we have to run following migration command that lets it know to apply the generated SQL migration files over to your database.
+
+so run:
+
+```bash
+npm run db:migrate
+
+```
+
+now you can verify that table got created in Neon db
+
+now we have succefully set up our database
