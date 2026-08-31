@@ -418,3 +418,253 @@ npm run db:migrate
 now you can verify that table got created in Neon db
 
 now we have succefully set up our database
+
+### 10. let's now create RESTful api
+
+REST: For Commands and initial state
+
+- creates the match
+- Fetches the list of matches
+- Load the app for the first time
+
+then websockets take over
+WebScockets: for live updates
+
+- Match created
+- Score updated
+- Commentary added
+- Live events pushed instantly
+
+now we'll implement the matches endpoints where we can
+
+- Create a match
+- List matches
+
+we're doing it with a proper validation using Zod. So, our real-time assistant isn't just fast, but correct. so let's build the base API.
+
+Create a new file for our router. src>routes>matches.js
+
+```javascript
+import { Router } from "express";
+
+export const matchRouter = Router();
+
+matchRouter.get("/", (req, res) => {
+  res.status(200).json({ message: "Matches List" });
+});
+```
+
+now we can import and use this route inside index.js
+
+```javascript
+import { matchRouter } from "./routes/matches";
+// below our home route
+app.use("/matches", matchRouter);
+```
+
+next, we'll use Zod for all request body params validation.
+so install it
+
+```bash
+npm i zod
+
+```
+
+Zod: is TypeScript-first schema validation with static type..
+zod will act as a middleware layer between the raw user input and your application logic. it make sure the score that we pass in actually a number rather than a string.
+
+let's create a zod validation file
+make a folder inside src as "validation"
+then under validation folder creat a file called matches.js
+
+```javascript
+import { z } from "zod";
+
+// first we have an object that defines different match statuses.
+export const MATCH_STATUS = {
+  SCHEDULED: "scheduled",
+  LIVE: "live",
+  FINISHED: "finished",
+};
+
+// then we have some helpers
+// listMatchesQuerySchema helper && matchIdParamSchema: where we specify the limit of matches. some thing for some information about the matchId and matchId params.
+export const listMatchesQuerySchema = z.object({
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
+
+export const matchIdParamSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
+
+// isoDateString helper
+const isoDateString = z.string().refine((val) => !isNaN(Date.parse(val)), {
+  message: "Invalid ISO date string",
+});
+
+// validate the input that we passed into the create match.
+export const createMatchSchema = z
+  .object({
+    sport: z.string().min(1),
+    homeTeam: z.string().min(1),
+    awayTeam: z.string().min(1),
+    startTime: isoDateString,
+    endTime: isoDateString,
+    homeScore: z.coerce.number().int().nonnegative().optional(),
+    awayScore: z.coerce.number().int().nonnegative().optional(),
+  })
+  .superRefine((data, ctx) => {
+    const start = new Date(data.startTime);
+    const end = new Date(data.endTime);
+    if (end <= start) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "endTime must be chronologically after startTime",
+        path: ["endTime"],
+      });
+    }
+  });
+
+export const updateScoreSchema = z.object({
+  homeScore: z.coerce.number().int().nonnegative(),
+  awayScore: z.coerce.number().int().nonnegative(),
+});
+```
+
+now we have the validations, let's create another folder within the src folder and call it "utils". within create a new file called match-status.js
+within we can create a quick utility function that's all about figuring out the match status.
+
+```javascript
+import { MATCH_STATUS } from "../validation/matches";
+
+export function getMatchStatus(startTime, endTime, now = new Date()) {
+  const start = new Date(startTime);
+  const end = new Date(endTime);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return null;
+  }
+
+  if (now < start) {
+    return MATCH_STATUS.SCHEDULED;
+  }
+
+  if (now >= end) {
+    return MATCH_STATUS.FINISHED;
+  }
+
+  return MATCH_STATUS.LIVE;
+}
+
+export async function syncMatchStatus(match, updateStatus) {
+  const nextStatus = getMatchStatus(match.startTime, match.endTime);
+
+  if (!nextStatus) {
+    return match.status;
+  }
+  if (match.status !== nextStatus) {
+    await updateStatus(nextStatus);
+    match.status = nextStatus;
+  }
+  return match.status;
+}
+```
+
+Now we want to implement the post request to actually create a new match
+we can do this within routes > matches.js
+
+```javascript
+import { Router } from "express";
+import { createMatchSchema } from "../validation/matches";
+import { matches } from "../db/schema";
+import { db } from "../db/db";
+import { getMatchStatus } from "../utils/match-status";
+
+export const matchRouter = Router();
+
+matchRouter.get("/", (req, res) => {
+  res.status(200).json({ message: "Matches List" });
+});
+
+matchRouter.post("/", async (req, res) => {
+  const parsed = createMatchSchema.safeParse(req.body);
+  const {
+    data: { startTime, endTime, homeScore, awayScore },
+  } = parsed;
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid payload.",
+      details: JSON.stringify(parsed.error),
+    });
+  }
+
+  try {
+    const [event] = await db
+      .insert(matches)
+      .values({
+        ...parsed.data,
+        startTime: new Date(startTime),
+        endTime: new Date(endTime),
+        homeScore: homeScore ?? 0,
+        awayScore: awayScore ?? 0,
+        status: getMatchStatus(startTime, endTime),
+      })
+      .returning();
+
+    res.status(201).json({ data: event });
+  } catch (e) {
+    res
+      .status(500)
+      .json({ error: "Failed to create match.", details: JSON.stringify(e) });
+  }
+});
+```
+
+Now test it on POSTMAN
+POST | http://localhost:8000
+
+body:
+
+```json
+{
+  "sport": "football",
+  "homeTeam": "Manchester City",
+  "awayTeam": "JSM United",
+  "startTime": "2027-02-01T12:00:00.000z",
+  "endTime": "2027-02-01T13:45:00.000z"
+}
+```
+
+now if you check you Neon db console it will show this inserted data
+
+now also edit the get all matches route also to give actual data
+
+```javascript
+const MAX_LIMIT = 100;
+
+matchRouter.get("/", async (req, res) => {
+  const parsed = listMatchesQuerySchema.safeParse(req.query);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid query.",
+      details: JSON.stringify(parsed.error),
+    });
+  }
+
+  const limit = Math.min(parsed.data.limit ?? 50, MAX_LIMIT);
+
+  try {
+    const data = await db
+      .select()
+      .from(matches)
+      .orderBy(desc(matches.createdAt))
+      .limit(limit);
+
+    res.status(200).json({ data });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to list matches" });
+  }
+});
+```
