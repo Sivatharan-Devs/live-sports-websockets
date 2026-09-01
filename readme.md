@@ -668,3 +668,191 @@ matchRouter.get("/", async (req, res) => {
   }
 });
 ```
+
+### 11. Add Websocket layer
+
+now we're going to implement a websocket server to transition our app from a traditional request response model to a presistent bi-directional architecture. A presistant bi-directional architecture is a connection that stays open indefinitely between the user and the server. In a standard setup, the connection closes as soon as the data is sent. But here, the pipe remains active. So both sides can send messages at any time.
+
+install the ws: a Node.js WebSocket library
+
+```bash
+npm i ws
+
+```
+
+create a new file, which will manage all connected clients and provide the broadcasting logic.
+create a folder inside src: ws , within create a file called server.js
+
+```javascript
+import { WebSocket, WebSocketServer } from "ws";
+
+// let's create a function that will send a JSON object to a specific client
+// it's going to be a helper function that'll prevent repetitive JSON.stringify calls and ensure the socket is actually open before sending.
+function sendJson(socket, payload) {
+  // Guard function
+  if (socket.readyState !== WebSocket.OPEN) return;
+
+  socket.send(JSON.stringify(payload));
+}
+
+// function for send data to every connected user
+function broadcast(wss, payload) {
+  for (const client of wss.clients) {
+    // Guard function
+    if (client.readyState !== WebSocket.OPEN) continue;
+
+    client.send(JSON.stringify(payload));
+  }
+}
+
+// Attach the websocket logic to our node server.
+export function attachWebSocketServer(server) {
+  // ws function will recieve the HTTP server instance created by Express and we're passing it in to the websocket
+  // so that it can attach itself to the same underlying server.
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    maxPayload: 1024 * 1024, //max size allowed for a single incoming websocket message
+  });
+
+  wss.on("connection", (socket) => {
+    sendJson(socket, { type: "welcome" });
+
+    socket.on("error", console.error);
+  });
+
+  function broadcastMatchCreated(match) {
+    broadcast(wss, { type: "match_created", data: match });
+  }
+
+  return { broadcastMatchCreated };
+}
+```
+
+now go to src>index.js
+let's hook it up with the websocket server.
+
+add .env file
+PORT=8000
+HOST=0.0.0.0
+
+```javascript
+import "dotenv/config";
+import express from "express";
+import http from "http";
+
+import { matchRouter } from "./routes/matches.js";
+import { attachWebSocketServer } from "./ws/server.js";
+
+const PORT = Number(process.env.PORT || 8000);
+const HOST = process.env.HOST || "0.0.0.0";
+
+const app = express();
+const server = http.createServer(app);
+
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.send("Hello from Express server!");
+});
+
+app.use("/matches", matchRouter);
+
+const { broadcastMatchCreated } = attachWebSocketServer(server);
+
+app.locals.broadcastMatchCreated = broadcastMatchCreated;
+
+server.listen(PORT, HOST, () => {
+  console.log(HOST, typeof HOST);
+
+  const baseUrl =
+    HOST === "0.0.0.0" ? `http://localhost:${PORT}` : `http://${HOST}:${PORT}`;
+
+  console.log(`Server is running on ${baseUrl}`);
+
+  console.log(
+    `WebSocket Server is running on ${baseUrl.replace("http", "ws")}/ws`,
+  );
+});
+```
+
+then inside the routes -> matches.js
+
+```javascript
+import { Router } from "express";
+import {
+  createMatchSchema,
+  listMatchesQuerySchema,
+} from "../validation/matches.js";
+import { matches } from "../db/schema.js";
+import { db } from "../db/db.js";
+import { getMatchStatus } from "../utils/match-status.js";
+import { desc } from "drizzle-orm";
+
+export const matchRouter = Router();
+
+const MAX_LIMIT = 100;
+
+matchRouter.get("/", async (req, res) => {
+  const parsed = listMatchesQuerySchema.safeParse(req.query);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid query.",
+      // details: JSON.stringify(parsed.error),
+      details: parsed.error.issues,
+    });
+  }
+
+  const limit = Math.min(parsed.data.limit ?? 50, MAX_LIMIT);
+
+  try {
+    const data = await db
+      .select()
+      .from(matches)
+      .orderBy(desc(matches.createdAt))
+      .limit(limit);
+
+    res.status(200).json({ data });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to list matches" });
+  }
+});
+
+matchRouter.post("/", async (req, res) => {
+  const parsed = createMatchSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid payload.",
+      details: parsed.error.issues,
+    });
+  }
+
+  const { startTime, endTime, homeScore, awayScore } = parsed.data;
+
+  try {
+    const [event] = await db
+      .insert(matches)
+      .values({
+        ...parsed.data,
+        startTime: new Date(startTime),
+        endTime: new Date(endTime),
+        homeScore: homeScore ?? 0,
+        awayScore: awayScore ?? 0,
+        status: getMatchStatus(startTime, endTime),
+      })
+      .returning();
+
+    if (res.app.locals.broadcastMatchCreated) {
+      res.app.locals.broadcastMatchCreated(event);
+    }
+    res.status(201).json({ data: event });
+  } catch (e) {
+    res.status(500).json({
+      error: "Failed to create match.",
+      details: JSON.stringify(e),
+    });
+  }
+});
+```
